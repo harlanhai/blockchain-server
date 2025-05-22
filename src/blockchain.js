@@ -1,4 +1,4 @@
-// 区块链核心实现
+// blockchain-server/src/blockchain.js (修复签名验证)
 const crypto = require('crypto');
 const secp256k1 = require('secp256k1');
 const { Buffer } = require('buffer');
@@ -59,45 +59,98 @@ class Transaction {
       .digest('hex');
   }
 
-  // 签名交易
+  // 签名交易 - 修复版本
   signTransaction(signingKey) {
     if (!signingKey) {
       throw new Error('未提供签名密钥');
     }
 
-    const txHash = this.calculateHash();
-    const msgHash = Buffer.from(txHash, 'hex');
-    
-    // 使用私钥签名
-    const privateKey = Buffer.from(signingKey, 'hex');
-    const { signature, recid } = secp256k1.ecdsaSign(msgHash, privateKey);
-    this.signature = Buffer.concat([signature, Buffer.from([recid])]).toString('hex');
+    try {
+      // 确保 signingKey 是 Buffer
+      const privateKeyBuffer = Buffer.isBuffer(signingKey) 
+        ? signingKey 
+        : Buffer.from(signingKey, 'hex');
+
+      // 验证私钥格式
+      if (privateKeyBuffer.length !== 32) {
+        throw new Error('私钥长度必须是32字节');
+      }
+
+      if (!secp256k1.privateKeyVerify(privateKeyBuffer)) {
+        throw new Error('无效的私钥');
+      }
+
+      // 计算交易哈希
+      const txHash = this.calculateHash();
+      const msgHash = Buffer.from(txHash, 'hex');
+      
+      // 使用私钥签名
+      const sigObj = secp256k1.ecdsaSign(msgHash, privateKeyBuffer);
+      
+      // 保存签名（包含恢复ID）
+      this.signature = {
+        signature: Buffer.from(sigObj.signature).toString('hex'),
+        recovery: sigObj.recid
+      };
+
+      console.log('交易签名成功');
+    } catch (error) {
+      console.error('签名交易时出错:', error.message);
+      throw new Error(`签名失败: ${error.message}`);
+    }
   }
 
-  // 验证交易签名
+  // 验证交易签名 - 修复版本
   isValid() {
     // 挖矿奖励交易不需要签名
     if (this.fromAddress === null) return true;
 
-    if (!this.signature || this.signature.length === 0) {
-      throw new Error('未找到交易签名');
+    if (!this.signature || !this.signature.signature) {
+      console.error('未找到交易签名');
+      return false;
     }
 
     try {
-      // 从公钥恢复地址
-      const publicKey = Buffer.from(this.fromAddress, 'hex');
+      // 从发送方地址获取公钥
+      // 注意：这里我们假设 fromAddress 就是公钥的哈希
+      // 在实际实现中，你可能需要维护一个地址到公钥的映射
+      
+      // 重新计算交易哈希
       const txHash = this.calculateHash();
       const msgHash = Buffer.from(txHash, 'hex');
       
-      // 将签名字符串转换为Buffer
-      const signatureBuffer = Buffer.from(this.signature, 'hex');
-      const signature = signatureBuffer.slice(0, 64);
-      const recid = signatureBuffer[64];
+      // 从签名中恢复公钥
+      const signatureBuffer = Buffer.from(this.signature.signature, 'hex');
+      const recovery = this.signature.recovery;
+      
+      // 恢复公钥
+      const recoveredPubKey = secp256k1.ecdsaRecover(signatureBuffer, recovery, msgHash);
+      
+      // 计算从恢复的公钥得到的地址
+      const recoveredAddress = crypto
+        .createHash('sha256')
+        .update(Buffer.from(recoveredPubKey))
+        .digest('hex');
+      
+      // 验证地址是否匹配
+      const isAddressMatch = recoveredAddress === this.fromAddress;
+      
+      if (!isAddressMatch) {
+        console.error('地址不匹配:', {
+          expected: this.fromAddress,
+          recovered: recoveredAddress
+        });
+        return false;
+      }
 
       // 验证签名
-      return secp256k1.ecdsaVerify(signature, msgHash, publicKey);
+      const isSignatureValid = secp256k1.ecdsaVerify(signatureBuffer, msgHash, recoveredPubKey);
+      
+      console.log('签名验证结果:', isSignatureValid);
+      return isSignatureValid;
+      
     } catch (error) {
-      console.error('验证交易时出错:', error.message);
+      console.error('验证交易签名时出错:', error.message);
       return false;
     }
   }
@@ -108,7 +161,7 @@ class Blockchain {
   constructor() {
     // 初始化区块链数组和未确认交易
     this.chain = [this.createGenesisBlock()];
-    this.difficulty = 3; // 挖矿难度
+    this.difficulty = 2; // 降低难度以便测试
     this.pendingTransactions = [];
     this.miningReward = 100; // 挖矿奖励
   }
@@ -149,27 +202,34 @@ class Blockchain {
     return block;
   }
 
-  // 添加交易到未确认交易池
+  // 添加交易到未确认交易池 - 修复版本
   addTransaction(transaction) {
     // 验证交易格式
     if (!transaction.fromAddress || !transaction.toAddress) {
       throw new Error('交易必须包含发送和接收地址');
     }
 
-    // 验证交易签名
-    if (!transaction.isValid() && transaction.fromAddress !== null) {
-      throw new Error('无效的交易签名');
+    if (typeof transaction.amount !== 'number' || transaction.amount <= 0) {
+      throw new Error('交易金额必须是正数');
     }
 
-    // 检查余额是否足够
+    // 验证交易签名（跳过系统奖励交易）
     if (transaction.fromAddress !== null) {
+      console.log('验证交易签名...');
+      if (!transaction.isValid()) {
+        throw new Error('无效的交易签名');
+      }
+      console.log('交易签名验证通过');
+
+      // 检查余额是否足够
       const senderBalance = this.getBalanceOfAddress(transaction.fromAddress);
       if (senderBalance < transaction.amount) {
-        throw new Error('余额不足');
+        throw new Error(`余额不足。当前余额: ${senderBalance}, 需要: ${transaction.amount}`);
       }
     }
 
     this.pendingTransactions.push(transaction);
+    console.log('交易已添加到待处理池');
     return true;
   }
 
@@ -204,17 +264,20 @@ class Blockchain {
 
       // 验证区块哈希
       if (currentBlock.hash !== currentBlock.calculateHash()) {
+        console.error('区块哈希无效:', currentBlock.index);
         return false;
       }
 
       // 验证区块链接
       if (currentBlock.previousHash !== previousBlock.hash) {
+        console.error('区块链接无效:', currentBlock.index);
         return false;
       }
 
       // 验证区块中的所有交易
       for (const tx of currentBlock.transactions) {
         if (!tx.isValid() && tx.fromAddress !== null) {
+          console.error('区块中包含无效交易:', currentBlock.index);
           return false;
         }
       }
@@ -223,7 +286,7 @@ class Blockchain {
   }
 }
 
-// 钱包功能
+// 钱包功能 - 修复版本
 class Wallet {
   constructor() {
     this.privateKey = null;
@@ -233,36 +296,50 @@ class Wallet {
 
   // 生成新的钱包
   generate() {
-    // 生成私钥
-    let privateKey;
-    do {
-      privateKey = crypto.randomBytes(32);
-    } while (!secp256k1.privateKeyVerify(privateKey));
+    try {
+      // 生成私钥
+      let privateKey;
+      do {
+        privateKey = crypto.randomBytes(32);
+      } while (!secp256k1.privateKeyVerify(privateKey));
 
-    // 从私钥导出公钥
-    const publicKey = secp256k1.publicKeyCreate(privateKey);
-    
-    // 计算地址 (公钥哈希)
-    const address = crypto
-      .createHash('sha256')
-      .update(Buffer.from(publicKey))
-      .digest('hex');
+      // 从私钥导出公钥
+      const publicKey = secp256k1.publicKeyCreate(privateKey);
+      
+      // 计算地址 (公钥哈希)
+      const address = crypto
+        .createHash('sha256')
+        .update(Buffer.from(publicKey))
+        .digest('hex');
 
-    this.privateKey = privateKey.toString('hex');
-    this.publicKey = Buffer.from(publicKey).toString('hex');
-    this.address = address;
+      this.privateKey = privateKey.toString('hex');
+      this.publicKey = Buffer.from(publicKey).toString('hex');
+      this.address = address;
 
-    return {
-      privateKey: this.privateKey,
-      publicKey: this.publicKey,
-      address: this.address
-    };
+      console.log('钱包生成成功:', {
+        address: this.address,
+        publicKey: this.publicKey.substring(0, 20) + '...'
+      });
+
+      return {
+        privateKey: this.privateKey,
+        publicKey: this.publicKey,
+        address: this.address
+      };
+    } catch (error) {
+      console.error('生成钱包时出错:', error.message);
+      throw new Error(`钱包生成失败: ${error.message}`);
+    }
   }
 
   // 从私钥恢复钱包
   fromPrivateKey(privateKeyHex) {
     try {
       const privateKey = Buffer.from(privateKeyHex, 'hex');
+      
+      if (privateKey.length !== 32) {
+        throw new Error('私钥长度必须是32字节');
+      }
       
       if (!secp256k1.privateKeyVerify(privateKey)) {
         throw new Error('无效的私钥');
@@ -281,12 +358,18 @@ class Wallet {
       this.publicKey = Buffer.from(publicKey).toString('hex');
       this.address = address;
 
+      console.log('钱包恢复成功:', {
+        address: this.address,
+        publicKey: this.publicKey.substring(0, 20) + '...'
+      });
+
       return {
         privateKey: this.privateKey,
         publicKey: this.publicKey,
         address: this.address
       };
     } catch (error) {
+      console.error('恢复钱包时出错:', error.message);
       throw new Error(`导入钱包失败: ${error.message}`);
     }
   }
