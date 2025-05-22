@@ -1,0 +1,21 @@
+{
+  "name": "blockchain-server",
+  "version": "1.0.0",
+  "description": "区块链服务端API",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "@koa/cors": "^5.0.0",
+    "@koa/router": "^10.1.1",
+    "buffer": "^6.0.3",
+    "koa": "^2.14.2",
+    "koa-bodyparser": "^4.4.1",
+    "secp256k1": "^5.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
